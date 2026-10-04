@@ -9,4 +9,4 @@ services:
     build:
       context: ./backend
     ports:
-      - "1323:1323"
+      - "8080:8080"
