@@ -1,4 +1,4 @@
-package main
+package auth
 
 import (
 	"context"
@@ -13,9 +13,10 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/labstack/echo/v5"
 	"golang.org/x/oauth2"
+
+	"backend/internal/store"
 )
 
 const (
@@ -27,7 +28,7 @@ const (
 	sessionAge    = 7 * 24 * time.Hour
 )
 
-type googleAuthConfig struct {
+type Config struct {
 	ClientID     string
 	ClientSecret string
 	RedirectURL  string
@@ -36,9 +37,14 @@ type googleAuthConfig struct {
 	SecureCookie bool
 }
 
-type googleAuth struct {
-	db         *pgxpool.Pool
-	config     googleAuthConfig
+type UserRepository interface {
+	SaveGoogleUser(context.Context, string, string, bool, string, string) (store.User, error)
+	FindUser(context.Context, uuid.UUID) (store.User, error)
+}
+
+type Google struct {
+	users      UserRepository
+	config     Config
 	oauth      *oauth2.Config
 	verifier   *oidc.IDTokenVerifier
 	sessionKey []byte
@@ -64,8 +70,8 @@ type sessionClaims struct {
 	jwt.RegisteredClaims
 }
 
-func newGoogleAuth(db *pgxpool.Pool, config googleAuthConfig) (*googleAuth, error) {
-	auth := &googleAuth{db: db, config: config}
+func NewGoogle(ctx context.Context, users UserRepository, config Config) (*Google, error) {
+	auth := &Google{users: users, config: config}
 	if config.ClientID == "" && config.ClientSecret == "" {
 		return auth, nil
 	}
@@ -79,23 +85,28 @@ func newGoogleAuth(db *pgxpool.Pool, config googleAuthConfig) (*googleAuth, erro
 		return nil, errors.New("GOOGLE_REDIRECT_URL must be set when Google login is enabled")
 	}
 
-	provider, err := oidc.NewProvider(context.Background(), googleIssuer)
+	provider, err := oidc.NewProvider(ctx, googleIssuer)
 	if err != nil {
 		return nil, err
 	}
 	auth.oauth = &oauth2.Config{
-		ClientID:     config.ClientID,
-		ClientSecret: config.ClientSecret,
-		RedirectURL:  config.RedirectURL,
-		Endpoint:     provider.Endpoint(),
-		Scopes:       []string{oidc.ScopeOpenID, "email", "profile"},
+		ClientID: config.ClientID, ClientSecret: config.ClientSecret,
+		RedirectURL: config.RedirectURL, Endpoint: provider.Endpoint(),
+		Scopes: []string{oidc.ScopeOpenID, "email", "profile"},
 	}
 	auth.verifier = provider.Verifier(&oidc.Config{ClientID: config.ClientID})
 	auth.sessionKey = []byte(config.SessionKey)
 	return auth, nil
 }
 
-func (a *googleAuth) startLogin(c *echo.Context) error {
+func (a *Google) RegisterRoutes(e *echo.Echo) {
+	e.GET("/auth/google", a.startLogin)
+	e.GET("/auth/google/callback", a.finishLogin)
+	e.GET("/api/me", a.currentUser)
+	e.POST("/auth/logout", a.logout)
+}
+
+func (a *Google) startLogin(c *echo.Context) error {
 	if a.oauth == nil {
 		return echo.NewHTTPError(http.StatusServiceUnavailable, "Google login is not configured")
 	}
@@ -112,20 +123,19 @@ func (a *googleAuth) startLogin(c *echo.Context) error {
 	return c.Redirect(http.StatusFound, a.oauth.AuthCodeURL(state, oauth2.SetAuthURLParam("nonce", nonce)))
 }
 
-func (a *googleAuth) finishLogin(c *echo.Context) error {
+func (a *Google) finishLogin(c *echo.Context) error {
 	if a.oauth == nil {
 		return echo.NewHTTPError(http.StatusServiceUnavailable, "Google login is not configured")
 	}
-	stateCookieValue, stateErr := c.Cookie(stateCookie)
-	nonceCookieValue, nonceErr := c.Cookie(nonceCookie)
+	stateValue, stateErr := c.Cookie(stateCookie)
+	nonceValue, nonceErr := c.Cookie(nonceCookie)
 	clearCookie(c, stateCookie, a.config.SecureCookie)
 	clearCookie(c, nonceCookie, a.config.SecureCookie)
 	state := c.QueryParam("state")
-	if stateErr != nil || nonceErr != nil || state == "" ||
-		subtle.ConstantTimeCompare([]byte(state), []byte(stateCookieValue.Value)) != 1 {
+	if stateErr != nil || nonceErr != nil || state == "" || subtle.ConstantTimeCompare([]byte(state), []byte(stateValue.Value)) != 1 {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid OAuth state")
 	}
-	if providerError := c.QueryParam("error"); providerError != "" {
+	if c.QueryParam("error") != "" {
 		return c.Redirect(http.StatusFound, a.config.FrontendURL+"/?login=cancelled")
 	}
 	code := c.QueryParam("code")
@@ -144,19 +154,18 @@ func (a *googleAuth) finishLogin(c *echo.Context) error {
 	if err != nil {
 		return echo.NewHTTPError(http.StatusUnauthorized, "Google identity verification failed")
 	}
-	if subtle.ConstantTimeCompare([]byte(idToken.Nonce), []byte(nonceCookieValue.Value)) != 1 {
+	if subtle.ConstantTimeCompare([]byte(idToken.Nonce), []byte(nonceValue.Value)) != 1 {
 		return echo.NewHTTPError(http.StatusUnauthorized, "invalid OAuth nonce")
 	}
 	var claims googleClaims
 	if err := idToken.Claims(&claims); err != nil || claims.Subject == "" || claims.Email == "" {
 		return echo.NewHTTPError(http.StatusUnauthorized, "Google profile is incomplete")
 	}
-
-	profile, err := a.saveUser(c.Request().Context(), claims)
+	user, err := a.users.SaveGoogleUser(c.Request().Context(), claims.Subject, claims.Email, claims.EmailVerified, claims.Name, claims.Picture)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "could not save user profile")
 	}
-	session, err := a.createSession(profile.ID)
+	session, err := a.createSession(user.ID)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "could not create login session")
 	}
@@ -168,7 +177,7 @@ func (a *googleAuth) finishLogin(c *echo.Context) error {
 	return c.Redirect(http.StatusFound, a.config.FrontendURL+"/?login=success")
 }
 
-func (a *googleAuth) currentUser(c *echo.Context) error {
+func (a *Google) currentUser(c *echo.Context) error {
 	c.Response().Header().Set(echo.HeaderCacheControl, "no-store")
 	if a.oauth == nil {
 		return echo.NewHTTPError(http.StatusServiceUnavailable, "Google login is not configured")
@@ -191,49 +200,25 @@ func (a *googleAuth) currentUser(c *echo.Context) error {
 	if err != nil {
 		return echo.NewHTTPError(http.StatusUnauthorized, "not signed in")
 	}
-	profile, err := a.findUser(c.Request().Context(), userID)
+	user, err := a.users.FindUser(c.Request().Context(), userID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return echo.NewHTTPError(http.StatusUnauthorized, "not signed in")
 		}
 		return echo.NewHTTPError(http.StatusInternalServerError, "could not load user profile")
 	}
-	return c.JSON(http.StatusOK, profile)
+	return c.JSON(http.StatusOK, userProfile{
+		ID: user.ID, Email: user.Email, EmailVerified: user.EmailVerified,
+		Name: user.Name, PictureURL: user.PictureURL,
+	})
 }
 
-func (a *googleAuth) logout(c *echo.Context) error {
+func (a *Google) logout(c *echo.Context) error {
 	clearCookie(c, sessionCookie, a.config.SecureCookie)
 	return c.NoContent(http.StatusNoContent)
 }
 
-func (a *googleAuth) saveUser(ctx context.Context, claims googleClaims) (userProfile, error) {
-	profile := userProfile{ID: uuid.New(), Email: claims.Email, EmailVerified: claims.EmailVerified, Name: claims.Name, PictureURL: claims.Picture}
-	err := a.db.QueryRow(ctx, `
-		INSERT INTO users (id, google_sub, email, email_verified, name, picture_url)
-		VALUES ($1, $2, $3, $4, $5, $6)
-		ON CONFLICT (google_sub) DO UPDATE SET
-			email = EXCLUDED.email,
-			email_verified = EXCLUDED.email_verified,
-			name = EXCLUDED.name,
-			picture_url = EXCLUDED.picture_url,
-			updated_at = NOW()
-		RETURNING id, email, email_verified, name, picture_url
-	`, profile.ID, claims.Subject, profile.Email, profile.EmailVerified, profile.Name, profile.PictureURL).Scan(
-		&profile.ID, &profile.Email, &profile.EmailVerified, &profile.Name, &profile.PictureURL,
-	)
-	return profile, err
-}
-
-func (a *googleAuth) findUser(ctx context.Context, id uuid.UUID) (userProfile, error) {
-	var profile userProfile
-	err := a.db.QueryRow(ctx, `
-		SELECT id, email, email_verified, name, picture_url
-		FROM users WHERE id = $1
-	`, id).Scan(&profile.ID, &profile.Email, &profile.EmailVerified, &profile.Name, &profile.PictureURL)
-	return profile, err
-}
-
-func (a *googleAuth) createSession(userID uuid.UUID) (string, error) {
+func (a *Google) createSession(userID uuid.UUID) (string, error) {
 	now := time.Now()
 	claims := sessionClaims{RegisteredClaims: jwt.RegisteredClaims{
 		Issuer: "deploy-test", Subject: userID.String(),
