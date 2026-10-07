@@ -2,20 +2,16 @@ services:
   frontend:
     build:
       context: ./frontend
+    env_file:
+      - ./frontend/.env
     ports:
       - "3000:3000"
 
   backend:
     build:
       context: ./backend
-    environment:
-      DATABASE_URL: ${DATABASE_URL:-postgres://app:app@database:5432/deploytest?sslmode=disable}
-      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
-      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
-      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
-      GOOGLE_REDIRECT_URL: ${GOOGLE_REDIRECT_URL:-http://localhost:8080/auth/google/callback}
-      SESSION_SECRET: ${SESSION_SECRET:-}
-      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+    env_file:
+      - ./backend/.env
     ports:
       - "8080:8080"
     depends_on:
