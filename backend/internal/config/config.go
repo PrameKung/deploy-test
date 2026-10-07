@@ -19,9 +19,7 @@ type Config struct {
 func Load() Config {
 	redirectURL := envOr("GOOGLE_REDIRECT_URL", "http://localhost:8080/auth/google/callback")
 	secureCookies := strings.HasPrefix(redirectURL, "https://")
-	if value := os.Getenv("COOKIE_SECURE"); value != "" {
-		secureCookies = strings.EqualFold(value, "true")
-	}
+	secureCookies = secureCookies || strings.EqualFold(os.Getenv("COOKIE_SECURE"), "true")
 
 	return Config{
 		Address:        envOr("BACKEND_ADDRESS", ":8080"),
