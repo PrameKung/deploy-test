@@ -25,7 +25,7 @@ func Load() Config {
 
 	return Config{
 		Address:        envOr("BACKEND_ADDRESS", ":8080"),
-		DatabaseURL:    envOr("DATABASE_URL", "postgres://app:app@localhost:5432/deploytest?sslmode=disable"),
+		DatabaseURL:    os.Getenv("DATABASE_URL"),
 		FrontendURL:    strings.TrimRight(envOr("FRONTEND_URL", "http://localhost:3000"), "/"),
 		GoogleClientID: os.Getenv("GOOGLE_CLIENT_ID"),
 		GoogleSecret:   os.Getenv("GOOGLE_CLIENT_SECRET"),
