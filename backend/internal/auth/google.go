@@ -171,7 +171,7 @@ func (a *Google) finishLogin(c *echo.Context) error {
 	}
 	http.SetCookie(c.Response(), &http.Cookie{
 		Name: sessionCookie, Value: session, Path: "/", HttpOnly: true,
-		Secure: a.config.SecureCookie, SameSite: http.SameSiteLaxMode,
+		Secure: a.config.SecureCookie, SameSite: cookieSameSite(a.config.SecureCookie),
 		MaxAge: int(sessionAge.Seconds()), Expires: time.Now().Add(sessionAge),
 	})
 	return c.Redirect(http.StatusFound, a.config.FrontendURL+"/?login=success")
@@ -238,7 +238,7 @@ func randomValue(size int) (string, error) {
 func setTemporaryCookie(c *echo.Context, name, value string, secure bool) {
 	http.SetCookie(c.Response(), &http.Cookie{
 		Name: name, Value: value, Path: "/", HttpOnly: true, Secure: secure,
-		SameSite: http.SameSiteLaxMode, MaxAge: int(oauthMaxAge.Seconds()),
+		SameSite: cookieSameSite(secure), MaxAge: int(oauthMaxAge.Seconds()),
 		Expires: time.Now().Add(oauthMaxAge),
 	})
 }
@@ -246,6 +246,13 @@ func setTemporaryCookie(c *echo.Context, name, value string, secure bool) {
 func clearCookie(c *echo.Context, name string, secure bool) {
 	http.SetCookie(c.Response(), &http.Cookie{
 		Name: name, Value: "", Path: "/", HttpOnly: true, Secure: secure,
-		SameSite: http.SameSiteLaxMode, MaxAge: -1, Expires: time.Unix(0, 0),
+		SameSite: cookieSameSite(secure), MaxAge: -1, Expires: time.Unix(0, 0),
 	})
+}
+
+func cookieSameSite(secure bool) http.SameSite {
+	if secure {
+		return http.SameSiteNoneMode
+	}
+	return http.SameSiteLaxMode
 }
