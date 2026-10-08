@@ -4,6 +4,8 @@ services:
       context: ./frontend
     env_file:
       - ./frontend/.env
+    environment:
+      BACKEND_PUBLIC_URL: http://backend:8080
     ports:
       - "3000:3000"
 
